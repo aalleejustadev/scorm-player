@@ -2,6 +2,9 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 class SCORM_Shortcode {
+    private static $modal_rendered = false;
+    private static $scripts_enqueued = false;
+
     public function __construct() {
         add_shortcode( 'scorm_player', array( $this, 'render_player' ) );
         add_action( 'wp_footer', array( $this, 'render_modal_template' ) );
@@ -28,28 +31,37 @@ class SCORM_Shortcode {
         );
         $launch_url = add_query_arg( $params, admin_url( 'admin-ajax.php' ) );
 
+        // Enqueue scripts only once
+        if ( ! self::$scripts_enqueued ) {
+            wp_enqueue_style( 'scorm-player-css', plugins_url( '../public/css/scorm-player.css', __FILE__ ), [], SCORM_PLAYER_VERSION );
+            wp_enqueue_script( 'scorm-player-js', plugins_url( '../public/js/scorm-player.js', __FILE__ ), [ 'jquery' ], SCORM_PLAYER_VERSION, true );
+            wp_enqueue_script( 'scorm-log-handler', plugins_url( '../public/js/scorm-log-handler.js', __FILE__ ), [ 'jquery' ], SCORM_PLAYER_VERSION, true );
+
+            wp_localize_script( 'scorm-player-js', 'scormPlayer', [
+                'ajax_url' => admin_url( 'admin-ajax.php' ),
+                'nonce'    => $nonce,
+            ]);
+            
+            self::$scripts_enqueued = true;
+        }
+
         ob_start(); ?>
         <div class="scorm-player-wrapper"
              data-course-id="<?php echo esc_attr( $post_id ); ?>"
              data-launch-url="<?php echo esc_url( $launch_url ); ?>">
             <button class="scorm-launch-btn">🎓 Start Course</button>
-            <div class="scorm-log-area"></div> <!-- ✅ Added log area -->
+            <div class="scorm-log-area"></div>
         </div>
         <?php
-
-        wp_enqueue_style( 'scorm-player-css', plugins_url( '../public/css/scorm-player.css', __FILE__ ), [], '1.2' );
-        wp_enqueue_script( 'scorm-player-js', plugins_url( '../public/js/scorm-player.js', __FILE__ ), [ 'jquery' ], '1.2', true );
-        wp_enqueue_script( 'scorm-log-handler', plugins_url( '../public/js/scorm-log-handler.js', __FILE__ ), [ 'jquery' ], '1.0', true );
-
-        wp_localize_script( 'scorm-player-js', 'scormPlayer', [
-            'ajax_url' => admin_url( 'admin-ajax.php' ),
-            'nonce'    => $nonce,
-        ]);
-
         return ob_get_clean();
     }
 
     public function render_modal_template() {
+        // Render modal only once even if multiple shortcodes exist
+        if ( self::$modal_rendered ) {
+            return;
+        }
+        self::$modal_rendered = true;
         ?>
         <div id="scorm-modal-overlay" class="scorm-modal-overlay" style="display:none;">
             <div class="scorm-modal-content">
@@ -60,4 +72,8 @@ class SCORM_Shortcode {
         <?php
     }
 }
-new SCORM_Shortcode();
+
+// Only instantiate once
+if ( ! isset( $GLOBALS['scorm_shortcode_instance'] ) ) {
+    $GLOBALS['scorm_shortcode_instance'] = new SCORM_Shortcode();
+}

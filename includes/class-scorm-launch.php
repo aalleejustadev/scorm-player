@@ -34,146 +34,249 @@ class SCORM_Launch {
             wp_die();
         }
 
-        $actor_param = isset( $_GET['actor'] ) ? wp_unslash( $_GET['actor'] ) : '';
-        $actor_json = '{}';
-        if ( ! empty( $actor_param ) ) {
-            $actor_json = wp_json_encode( json_decode( urldecode( $actor_param ), true ) );
-            if ( $actor_json === null ) $actor_json = '{}';
+        $launch_esc = esc_url( $launch_url );
+        $ajax_url_esc = esc_url( admin_url('admin-ajax.php') );
+        ?>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SCORM Launch</title>
+  <style>
+    html,body{height:100%;margin:0;background:#fff;}
+    .scorm-wrapper{width:100%;height:100%;}
+    .scorm-frame{width:100%;height:100%;border:0;}
+    .scorm-loading{position:absolute;left:50%;top:50%;transform: translate(-50%, -50%);}
+    .loader {
+      width: 15px;
+      aspect-ratio: 1;
+      position: relative;
+    }
+    .loader::before,
+    .loader::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: #000;
+    }
+    .loader::before {
+      box-shadow: -25px 0;
+      animation: l8-1 1s infinite linear;
+    }
+    .loader::after {
+      transform: rotate(0deg) translateX(25px);
+      animation: l8-2 1s infinite linear;
+    }
+    @keyframes l8-1 { 100%{transform: translateX(25px)} }
+    @keyframes l8-2 { 100%{transform: rotate(-180deg) translateX(25px)} }
+  </style>
+</head>
+<body>
+  <div class="scorm-loading" id="scorm-loading">
+    <div class="loader"></div>
+  </div>
+  <div class="scorm-wrapper">
+    <iframe id="scorm-course-frame" class="scorm-frame" src="<?php echo $launch_esc; ?>" allow="autoplay; fullscreen;"></iframe>
+  </div>
+
+  <script>
+    var COURSE_ID = <?php echo (int) $course_id; ?>;
+    var ajaxURL = "<?php echo $ajax_url_esc; ?>";
+
+    (function () {
+      if ( window.API || window.API_1484_11 ) return;
+      
+      function noopTrue() { return "true"; }
+      function noopEmpty() { return ""; }
+
+      // Load saved progress synchronously before SCORM content loads
+      var savedProgress = {};
+      try {
+        var xhr = new XMLHttpRequest();
+        xhr.open("GET", ajaxURL + "?action=scorm_get_progress&course_id=" + COURSE_ID, false);
+        xhr.send(null);
+        if (xhr.status === 200) {
+          var resp = JSON.parse(xhr.responseText);
+          if (resp.success && resp.data) {
+            savedProgress = resp.data;
+            console.log("[SCORM] Loaded saved progress:", savedProgress);
+          } else {
+            console.log("[SCORM] No saved progress found");
+          }
+        }
+      } catch (e) { 
+        console.warn("Could not load saved progress:", e); 
+      }
+
+      // Initialize session data with saved progress
+      var sessionData = {
+        "cmi.core.lesson_location": savedProgress["cmi.core.lesson_location"] || "",
+        "cmi.suspend_data": savedProgress["cmi.suspend_data"] || "",
+        "cmi.core.lesson_status": savedProgress["cmi.core.lesson_status"] || "not attempted",
+        "cmi.core.score.raw": savedProgress["cmi.core.score.raw"] || "",
+        "cmi.core.score.min": savedProgress["cmi.core.score.min"] || "",
+        "cmi.core.score.max": savedProgress["cmi.core.score.max"] || ""
+      };
+
+      console.log("[SCORM] Initialized session data:", sessionData);
+      console.log("[SCORM] Starting from location:", sessionData["cmi.core.lesson_location"]);
+
+      // Debounced save function to avoid too many requests
+      var saveTimeout = null;
+      function debouncedSave() {
+        clearTimeout(saveTimeout);
+        saveTimeout = setTimeout(function() {
+          saveProgressBatch();
+        }, 1000);
+      }
+
+      function saveProgressBatch(useBeacon) {
+        // Use sendBeacon for unload scenarios (more reliable)
+        if (useBeacon && navigator.sendBeacon) {
+          const formData = new FormData();
+          formData.append("action", "scorm_save_progress");
+          formData.append("course_id", COURSE_ID);
+          formData.append("progress", JSON.stringify(sessionData));
+          
+          navigator.sendBeacon(ajaxURL, formData);
+          console.log("[SCORM] Progress sent via sendBeacon");
+          return;
         }
 
-        $launch_esc = esc_url( $launch_url );
-        $actor_json_esc = esc_js( $actor_json );
-        ?>
-      <!doctype html>
-      <html lang="en">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width,initial-scale=1" />
-        <title>SCORM Launch</title>
-        <style>
-          html,body{height:100%;margin:0;background:#fff;}
-          .scorm-wrapper{width:100%;height:100%;}
-          .scorm-frame{width:100%;height:100%;border:0;}
-          .scorm-loading{position:absolute;left:50%;top:50%;transform: translate(-50%, -50%);}
-          .loader {
-            width: 15px;
-            aspect-ratio: 1;
-            position: relative;
+        // Normal fetch for regular saves
+        var params = new URLSearchParams();
+        params.append("action", "scorm_save_progress");
+        params.append("course_id", COURSE_ID);
+        params.append("progress", JSON.stringify(sessionData));
+
+        fetch(ajaxURL, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: params.toString()
+        })
+        .then(function(response) { return response.json(); })
+        .then(function(data) {
+          if (data.success) {
+            console.log("[SCORM] Progress saved successfully");
           }
-          .loader::before,
-          .loader::after {
-            content: "";
-            position: absolute;
-            inset: 0;
-            border-radius: 50%;
-            background: #000;
+        })
+        .catch(function(err) { 
+          console.warn("Failed saving progress", err); 
+        });
+      }
+
+      // SCORM 1.2 API Implementation
+      var API12 = {
+        sessionData: sessionData, // Expose sessionData
+        
+        LMSInitialize: function() {
+          console.log("[SCORM] LMSInitialize called");
+          return "true";
+        },
+        
+        LMSFinish: function() {
+          console.log("[SCORM] LMSFinish called");
+          clearTimeout(saveTimeout); // Clear any pending debounced saves
+          saveProgressBatch(true); // Use beacon for reliability
+          return "true";
+        },
+        
+        LMSGetValue: function (key) {
+          var value = sessionData[key] || "";
+          console.log("[SCORM] LMSGetValue:", key, "=", value);
+          return value;
+        },
+        
+        LMSSetValue: function (key, value) {
+          console.log("[SCORM] LMSSetValue:", key, "=", value);
+          sessionData[key] = value;
+          debouncedSave(); // Debounced save
+          return "true";
+        },
+        
+        LMSCommit: function() {
+          console.log("[SCORM] LMSCommit called");
+          clearTimeout(saveTimeout); // Clear any pending debounced saves
+          saveProgressBatch(false); // Regular save for commit
+          return "true";
+        },
+        
+        LMSGetLastError: noopEmpty,
+        LMSGetErrorString: noopEmpty,
+        LMSGetDiagnostic: noopEmpty
+      };
+
+      window.API = API12;
+      
+      // Also expose sessionData directly on window for easier access
+      window.scormSessionData = sessionData;
+
+      // Save progress before unload using sendBeacon for reliability
+      var beaconSent = false;
+      var isUnloading = false;
+      
+      window.addEventListener('beforeunload', function () {
+        if (beaconSent) return;
+        beaconSent = true;
+        isUnloading = true;
+
+        const formData = new FormData();
+        formData.append("action", "scorm_save_progress");
+        formData.append("course_id", COURSE_ID);
+        formData.append("progress", JSON.stringify(sessionData));
+
+        // sendBeacon is more reliable than fetch on page unload
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(ajaxURL, formData);
+          console.log("[SCORM] Final progress sent via sendBeacon");
+        } else {
+          // Fallback to synchronous AJAX
+          try {
+            var params = new URLSearchParams();
+            params.append("action", "scorm_save_progress");
+            params.append("course_id", COURSE_ID);
+            params.append("progress", JSON.stringify(sessionData));
+            
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", ajaxURL, false);
+            xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+            xhr.send(params.toString());
+            console.log("[SCORM] Final progress sent via XHR");
+          } catch(e) {
+            console.warn("[SCORM] Failed to send final progress", e);
           }
-          .loader::before {
-            box-shadow: -25px 0;
-            animation: l8-1 1s infinite linear;
-          }
-          .loader::after {
-            transform: rotate(0deg) translateX(25px);
-            animation: l8-2 1s infinite linear;
-          }
-          @keyframes l8-1 { 100%{transform: translateX(25px)} }
-          @keyframes l8-2 { 100%{transform: rotate(-180deg) translateX(25px)} }
-        </style>
-      </head>
-      <body>
-        <div class="scorm-loading" id="scorm-loading">
-          <div class="loader"></div>
-        </div>
-        <div class="scorm-wrapper">
-          <iframe id="scorm-course-frame" class="scorm-frame" src="<?php echo $launch_esc; ?>" allow="autoplay; fullscreen;"></iframe>
-        </div>
+        }
+      });
+      
+      // Handle page visibility changes (when user switches tabs or modal closes)
+      document.addEventListener('visibilitychange', function() {
+        if (document.hidden && !isUnloading) {
+          saveProgressBatch(true); // Use beacon when page becomes hidden
+        }
+      });
 
-        <script>
-          var SCORM_ACTOR = <?php echo $actor_json_esc; ?> || {};
-          var COURSE_ID = <?php echo (int) $course_id; ?>;
-          var ajaxURL = "<?php echo admin_url('admin-ajax.php'); ?>";
+      // Periodic auto-save every 30 seconds
+      setInterval(function() {
+        saveProgressBatch();
+      }, 30000);
+    })();
 
-          (function () {
-            if ( window.API || window.API_1484_11 ) return;
-            function noopTrue() { return "true"; }
-            function noopEmpty() { return ""; }
-
-            var savedProgress = {};
-            try {
-              var xhr = new XMLHttpRequest();
-              xhr.open("GET", ajaxURL + "?action=scorm_get_progress&course_id=" + COURSE_ID, false);
-              xhr.send(null);
-              if (xhr.status === 200) {
-                var resp = JSON.parse(xhr.responseText);
-                if (resp.success && resp.data) savedProgress = resp.data;
-              }
-            } catch (e) { console.warn("Could not load saved progress:", e); }
-
-            var sessionData = {
-              lesson_location: savedProgress.lesson_location || "",
-              suspend_data: savedProgress.suspend_data || "",
-              lesson_status: savedProgress.lesson_status || "not attempted"
-            };
-
-            var API12 = {
-              LMSInitialize: noopTrue,
-              LMSFinish: noopTrue,
-              LMSGetValue: function (key) {
-                if (key === "cmi.core.lesson_location") return sessionData.lesson_location;
-                if (key === "cmi.suspend_data") return sessionData.suspend_data;
-                if (key === "cmi.core.lesson_status") return sessionData.lesson_status;
-                return "";
-              },
-              LMSSetValue: function (key, value) {
-                if (key === "cmi.core.lesson_location") sessionData.lesson_location = value;
-                if (key === "cmi.suspend_data") sessionData.suspend_data = value;
-                if (key === "cmi.core.lesson_status") sessionData.lesson_status = value;
-                logEvent("LMSSetValue", { key: key, value: value });
-                saveProgress();
-                return "true";
-              },
-              LMSCommit: function() {
-                logEvent("LMSCommit");
-                saveProgress();
-                return "true";
-              },
-              LMSGetLastError: noopEmpty,
-              LMSGetErrorString: noopEmpty,
-              LMSGetDiagnostic: noopEmpty
-            };
-
-            window.API = API12;
-
-            function saveProgress() {
-              fetch(ajaxURL, {
-                method: "POST",
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                body: new URLSearchParams({
-                  action: "scorm_save_progress",
-                  course_id: COURSE_ID,
-                  lesson_location: sessionData.lesson_location,
-                  suspend_data: sessionData.suspend_data,
-                  lesson_status: sessionData.lesson_status
-                })
-              }).catch(err => console.warn("Failed saving progress", err));
-            }
-
-            function logEvent(type, data) {
-              console.log(`[SCORM] ${type}`, data || {});
-            }
-
-            window.addEventListener('beforeunload', saveProgress);
-          })();
-
-          document.getElementById('scorm-course-frame').addEventListener('load', function () {
-            setTimeout(() => {
-              document.getElementById('scorm-loading').style.display = 'none';
-            }, 3000);
-          });
-        </script>
-      </body>
-    </html>
-    <?php wp_die(); }
+    // Hide loading spinner after iframe loads
+    document.getElementById('scorm-course-frame').addEventListener('load', function () {
+      setTimeout(function() {
+        document.getElementById('scorm-loading').style.display = 'none';
+      }, 1000);
+    });
+  </script>
+</body>
+</html>
+        <?php 
+        wp_die(); 
+    }
 }
 
 new SCORM_Launch();
+
+// Make sure to also update class-scorm-progress.php save_progress method
